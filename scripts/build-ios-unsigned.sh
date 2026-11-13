@@ -3,6 +3,9 @@ set -euo pipefail
 
 VERSION="${1:?Usage: build-ios-unsigned.sh VERSION}"
 ROOT="$(pwd)"
+
+bash "$ROOT/scripts/patch-ios.sh"
+
 LOG="$ROOT/ios-build-session.log"
 ADDR_FILE="$(node -p "require('os').tmpdir() + '/' + require('./src-tauri/tauri.conf.json').identifier + '-server-addr'")"
 mkdir -p artifacts

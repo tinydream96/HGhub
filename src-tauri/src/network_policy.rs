@@ -113,6 +113,10 @@ pub fn allowed_ip(ip: IpAddr) -> bool {
                 return allowed_ip(IpAddr::V4(v4));
             }
             let s = ip.segments();
+            // 过滤 GFW 投毒特征地址（如 3131:3131:... 全同段伪造地址）
+            if s.iter().all(|&seg| seg == s[0]) {
+                return false;
+            }
             // 仅全球单播；拒绝 ULA、链路本地、回环、组播、NAT64，以及可封装私网 IPv4 的 6to4/Teredo。
             (s[0] & 0xe000) == 0x2000
                 && s[0] != 0x2002
@@ -184,16 +188,20 @@ pub fn check_addresses_with_mode(addrs: &[SocketAddr], strict: bool) -> Result<(
     Ok(())
 }
 
-/// 与浏览器一致优先 IPv6：连接器以首个地址的协议族为首选，另一族在其失败后（Happy Eyeballs）兜底。
-/// 普通排序会把 IPv4 排在前面；共享 IPv4 出口被上游接口限流时，请求会挂起或返回 502/503，
-/// 而同一网络下浏览器走 IPv6 一切正常。
-fn sort_ipv6_first(addrs: &mut [SocketAddr]) {
+/// 排序地址族：移动端优先 IPv4，避免移动网络或 Wi-Fi 下 IPv6 路由黑洞或 DNS 投毒；桌面端优先 IPv6。
+#[cfg(any(target_os = "ios", target_os = "android"))]
+fn sort_addrs(addrs: &mut [SocketAddr]) {
+    addrs.sort_unstable_by_key(|addr| (!addr.is_ipv4(), *addr));
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+fn sort_addrs(addrs: &mut [SocketAddr]) {
     addrs.sort_unstable_by_key(|addr| (addr.is_ipv4(), *addr));
 }
 
 pub async fn resolve_target(url: &Url, strict: bool) -> Result<Vec<SocketAddr>, String> {
     let port = url.port_or_known_default().ok_or("目标端口无效")?;
-    let mut addrs = match url.host().ok_or("目标缺少主机名")? {
+    let mut addrs: Vec<SocketAddr> = match url.host().ok_or("目标缺少主机名")? {
         Host::Ipv4(ip) => vec![SocketAddr::new(ip.into(), port)],
         Host::Ipv6(ip) => vec![SocketAddr::new(ip.into(), port)],
         Host::Domain(host) => tokio::time::timeout(
@@ -205,7 +213,11 @@ pub async fn resolve_target(url: &Url, strict: bool) -> Result<Vec<SocketAddr>, 
         .map_err(|_| "DNS 解析失败")?
         .collect(),
     };
-    sort_ipv6_first(&mut addrs);
+    if strict {
+        // 过滤掉不可用或被污染的地址，保留正常可达的有效 IP
+        addrs.retain(|addr| allowed_ip(addr.ip()));
+    }
+    sort_addrs(&mut addrs);
     addrs.dedup();
     check_addresses_with_mode(&addrs, strict)?;
     Ok(addrs)
@@ -265,10 +277,28 @@ mod tests {
         .iter()
         .map(|s| s.parse().unwrap())
         .collect();
-        sort_ipv6_first(&mut addrs);
-        assert!(addrs[..2].iter().all(SocketAddr::is_ipv6), "{addrs:?}");
-        assert!(addrs[2..].iter().all(SocketAddr::is_ipv4), "{addrs:?}");
-        assert_eq!(addrs[2], "18.65.214.3:443".parse::<SocketAddr>().unwrap());
+        sort_addrs(&mut addrs);
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        {
+            assert!(addrs[..2].iter().all(SocketAddr::is_ipv6), "{addrs:?}");
+            assert!(addrs[2..].iter().all(SocketAddr::is_ipv4), "{addrs:?}");
+            assert_eq!(addrs[2], "18.65.214.3:443".parse::<SocketAddr>().unwrap());
+        }
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        {
+            assert!(addrs[..2].iter().all(SocketAddr::is_ipv4), "{addrs:?}");
+            assert!(addrs[2..].iter().all(SocketAddr::is_ipv6), "{addrs:?}");
+        }
+    }
+
+    #[test]
+    fn poisoned_ipv6_is_blocked() {
+        for ip in [
+            "3131:3131:3131:3131:3131:3131:3131:3131",
+            "2001:2001:2001:2001:2001:2001:2001:2001",
+        ] {
+            assert!(!allowed_ip(ip.parse().unwrap()), "{ip}");
+        }
     }
 
     #[test]

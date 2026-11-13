@@ -90,7 +90,13 @@ html.theme-light {
   --color-on-danger: var(--p-on-danger);
 }
 
-html, body, #root { height: 100%; overflow: hidden; overscroll-behavior: none; }
+html, body, #root {
+  height: 100%;
+  height: 100dvh;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background-color: #000;
+}
 body {
   margin: 0;
   background: var(--p-canvas);
